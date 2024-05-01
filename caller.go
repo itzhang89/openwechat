@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -77,15 +76,6 @@ func (c *Caller) GetLoginInfo(ctx context.Context, path *url.URL) (*LoginInfo, e
 	// 微信 v2 版本修复了301 response missing Location header 的问题
 	defer func() { _ = resp.Body.Close() }()
 
-	// 这里部分账号可能会被误判, 但是我又没有号测试。如果你遇到了这个问题，可以帮忙解决一下。😊
-	if _, exists := CookieGroup(resp.Cookies()).GetByName("wxuin"); !exists {
-		err = ErrForbidden
-		if c.Client.mode != desktop {
-			err = fmt.Errorf("%w: try to login with desktop mode", err)
-		}
-		return nil, err
-	}
-
 	bs, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -99,8 +89,8 @@ func (c *Caller) GetLoginInfo(ctx context.Context, path *url.URL) (*LoginInfo, e
 	if err = xml.NewDecoder(bytes.NewBuffer(bs)).Decode(&loginInfo); err != nil {
 		return nil, err
 	}
-	if !loginInfo.Ok() {
-		return nil, loginInfo.Err()
+	if err = loginInfo.Err(); err != nil {
+		return nil, err
 	}
 	// set domain
 	c.Client.Domain = WechatDomain(path.Host)
@@ -118,8 +108,8 @@ func (c *Caller) WebInit(ctx context.Context, request *BaseRequest) (*WebInitRes
 	if err = json.NewDecoder(resp.Body).Decode(&webInitResponse); err != nil {
 		return nil, err
 	}
-	if !webInitResponse.BaseResponse.Ok() {
-		return nil, webInitResponse.BaseResponse.Err()
+	if err = webInitResponse.BaseResponse.Err(); err != nil {
+		return nil, err
 	}
 	return &webInitResponse, nil
 }
@@ -186,8 +176,8 @@ func (c *Caller) WebWxGetContact(ctx context.Context, info *LoginInfo) (Members,
 		if err = resp.Body.Close(); err != nil {
 			return nil, err
 		}
-		if !item.BaseResponse.Ok() {
-			return nil, item.BaseResponse.Err()
+		if err = item.BaseResponse.Err(); err != nil {
+			return nil, err
 		}
 		members = append(members, item.MemberList...)
 
@@ -211,8 +201,8 @@ func (c *Caller) WebWxBatchGetContact(ctx context.Context, members Members, requ
 	if err = json.NewDecoder(resp.Body).Decode(&item); err != nil {
 		return nil, err
 	}
-	if !item.BaseResponse.Ok() {
-		return nil, item.BaseResponse.Err()
+	if err = item.BaseResponse.Err(); err != nil {
+		return nil, err
 	}
 	return item.ContactList, nil
 }
@@ -285,21 +275,19 @@ func (c *Caller) WebWxOplog(ctx context.Context, opt *CallerWebWxOplogOptions) e
 type CallerUploadMediaOptions struct {
 	FromUserName string
 	ToUserName   string
-	File         *os.File
 	BaseRequest  *BaseRequest
 	LoginInfo    *LoginInfo
 }
 
-func (c *Caller) UploadMedia(ctx context.Context, opt *CallerUploadMediaOptions) (*UploadResponse, error) {
+func (c *Caller) UploadMedia(ctx context.Context, file *os.File, opt *CallerUploadMediaOptions) (*UploadResponse, error) {
 	// 首先尝试上传图片
 	clientWebWxUploadMediaByChunkOpt := &ClientWebWxUploadMediaByChunkOptions{
 		FromUserName: opt.FromUserName,
 		ToUserName:   opt.ToUserName,
-		File:         opt.File,
 		BaseRequest:  opt.BaseRequest,
 		LoginInfo:    opt.LoginInfo,
 	}
-	resp, err := c.Client.WebWxUploadMediaByChunk(ctx, clientWebWxUploadMediaByChunkOpt)
+	resp, err := c.Client.WebWxUploadMediaByChunk(ctx, file, clientWebWxUploadMediaByChunkOpt)
 	// 无错误上传成功之后获取请求结果，判断结果是否正常
 	if err != nil {
 		return nil, err
@@ -309,8 +297,8 @@ func (c *Caller) UploadMedia(ctx context.Context, opt *CallerUploadMediaOptions)
 	if err = json.NewDecoder(resp.Body).Decode(&item); err != nil {
 		return &item, err
 	}
-	if !item.BaseResponse.Ok() {
-		return &item, item.BaseResponse.Err()
+	if err = item.BaseResponse.Err(); err != nil {
+		return &item, err
 	}
 	if len(item.MediaId) == 0 {
 		return &item, errors.New("upload failed")
@@ -341,11 +329,10 @@ func (c *Caller) WebWxSendImageMsg(ctx context.Context, opt *CallerWebWxSendImag
 		uploadMediaOption := &CallerUploadMediaOptions{
 			FromUserName: opt.FromUserName,
 			ToUserName:   opt.ToUserName,
-			File:         file,
 			BaseRequest:  opt.BaseRequest,
 			LoginInfo:    opt.LoginInfo,
 		}
-		resp, err := c.UploadMedia(ctx, uploadMediaOption)
+		resp, err := c.UploadMedia(ctx, file, uploadMediaOption)
 		if err != nil {
 			return nil, err
 		}
@@ -380,11 +367,10 @@ func (c *Caller) WebWxSendFile(ctx context.Context, opt *CallerWebWxSendFileOpti
 	uploadMediaOption := &CallerUploadMediaOptions{
 		FromUserName: opt.FromUserName,
 		ToUserName:   opt.ToUserName,
-		File:         file,
 		BaseRequest:  opt.BaseRequest,
 		LoginInfo:    opt.LoginInfo,
 	}
-	resp, err := c.UploadMedia(ctx, uploadMediaOption)
+	resp, err := c.UploadMedia(ctx, file, uploadMediaOption)
 	if err != nil {
 		return nil, err
 	}
@@ -412,12 +398,10 @@ func (c *Caller) WebWxSendVideoMsg(ctx context.Context, opt *CallerWebWxSendAppM
 		uploadMediaOption := &CallerUploadMediaOptions{
 			FromUserName: opt.FromUserName,
 			ToUserName:   opt.ToUserName,
-			File:         file,
 			BaseRequest:  opt.BaseRequest,
 			LoginInfo:    opt.LoginInfo,
 		}
-
-		resp, err := c.UploadMedia(ctx, uploadMediaOption)
+		resp, err := c.UploadMedia(ctx, file, uploadMediaOption)
 		if err != nil {
 			return nil, err
 		}
@@ -608,7 +592,7 @@ func (c *Caller) WebWxPushLogin(ctx context.Context, uin int64) (*PushLoginRespo
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var item PushLoginResponse
-	if err := json.NewDecoder(resp.Body).Decode(&item); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&item); err != nil {
 		return nil, err
 	}
 	return &item, nil
@@ -648,8 +632,8 @@ func (c *Caller) WebWxCreateChatRoom(ctx context.Context, opt *CallerWebWxCreate
 	if err = json.NewDecoder(resp.Body).Decode(&item); err != nil {
 		return nil, err
 	}
-	if !item.BaseResponse.Ok() {
-		return nil, item.BaseResponse.Err()
+	if err = item.BaseResponse.Err(); err != nil {
+		return nil, err
 	}
 	group := Group{User: &User{UserName: item.ChatRoomName}}
 	return &group, nil
@@ -695,8 +679,8 @@ func (p *MessageResponseParser) Err() error {
 	if err := json.NewDecoder(p.Reader).Decode(&item); err != nil {
 		return err
 	}
-	if !item.BaseResponse.Ok() {
-		return item.BaseResponse.Err()
+	if err := item.BaseResponse.Err(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -707,8 +691,8 @@ func (p *MessageResponseParser) MsgID() (string, error) {
 	if err := json.NewDecoder(p.Reader).Decode(&messageResp); err != nil {
 		return "", err
 	}
-	if !messageResp.BaseResponse.Ok() {
-		return "", messageResp.BaseResponse.Err()
+	if err := messageResp.BaseResponse.Err(); err != nil {
+		return "", err
 	}
 	return messageResp.MsgID, nil
 }
